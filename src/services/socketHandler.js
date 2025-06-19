@@ -1,7 +1,17 @@
-// src/services/socketHandler.js
+/**
+ * socketHandler.js
+ * 
+ * This file now handles a more flexible video data structure to support
+ * multiple video sources (e.g., YouTube, Google Drive, direct links).
+ * 
+ * The key change is moving from a simple `currentVideoId` string to a
+ * `currentVideo` object, which looks like: { source: 'youtube', id: '...' }
+ * or { source: 'gdrive', id: 'https://...' }.
+ */
 
 // In-memory store for active room data.
-// Key: roomId, Value: { users: [], videoState: {}, videoId: '...' }
+// UPDATED: The value now contains a 'currentVideo' object instead of a 'videoId' string.
+// Key: roomId, Value: { users: [], videoState: {}, currentVideo: { source, id } }
 const rooms = {};
 
 export const handleSocketConnections = (io) => {
@@ -20,11 +30,12 @@ export const handleSocketConnections = (io) => {
                 rooms[roomId] = {
                     users: [],
                     videoState: { isPlaying: false, time: 0, speed: 1 },
-                    currentVideoId: null,
+                    // UPDATED: Changed from currentVideoId to a more flexible object.
+                    currentVideo: null,
                 };
             }
 
-            // ✅ Only add if not already present (avoid duplicates on refresh)
+            // Only add if not already present (avoid duplicates on refresh)
             const existingUserIndex = rooms[roomId].users.findIndex(
                 (u) => u.id === socket.id
             );
@@ -36,7 +47,8 @@ export const handleSocketConnections = (io) => {
             socket.emit('room-state', {
                 users: rooms[roomId].users,
                 videoState: rooms[roomId].videoState,
-                currentVideoId: rooms[roomId].currentVideoId,
+                // UPDATED: Send the entire 'currentVideo' object.
+                currentVideo: rooms[roomId].currentVideo,
             });
 
             // Notify everyone else in the room about the new user
@@ -46,6 +58,7 @@ export const handleSocketConnections = (io) => {
         });
 
         // --- Video Synchronization ---
+        // NO CHANGES NEEDED HERE: This event correctly syncs player state regardless of the video source.
         socket.on('player-state-change', ({ roomId, state }) => {
             if (rooms[roomId]) {
                 rooms[roomId].videoState = state;
@@ -54,17 +67,22 @@ export const handleSocketConnections = (io) => {
             }
         });
 
-        socket.on('change-video', ({ roomId, videoId }) => {
+        // UPDATED: This event now accepts a 'video' object instead of a 'videoId' string.
+        socket.on('change-video', ({ roomId, video }) => { // `video` is now an object like { source, id }
             if (rooms[roomId]) {
-                rooms[roomId].currentVideoId = videoId;
+                // Store the entire video object
+                rooms[roomId].currentVideo = video;
+                
                 // Reset state for new video
                 rooms[roomId].videoState = { isPlaying: true, time: 0, speed: 1 };
-                // Inform all clients in the room about the new video
-                io.to(roomId).emit('video-changed', videoId);
+
+                // Inform all clients in the room about the new video object
+                io.to(roomId).emit('video-changed', video);
             }
         });
 
         // --- Chat & Reactions ---
+        // NO CHANGES NEEDED HERE.
         socket.on('send-message', ({ roomId, message }) => {
             // Broadcast the message to all clients in the room
             io.to(roomId).emit('new-message', message);
@@ -76,6 +94,7 @@ export const handleSocketConnections = (io) => {
         });
 
         // --- Disconnect Handling ---
+        // NO CHANGES NEEDED HERE.
         socket.on('disconnect', () => {
             console.log(`User disconnected: ${socket.id}`);
             // Find which room the user was in and remove them
