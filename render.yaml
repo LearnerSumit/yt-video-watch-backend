@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: yt-video-watch-backend
+    env: node
+    plan: free
+    branch: main
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: node src/server.js
+    autoDeploy: true
