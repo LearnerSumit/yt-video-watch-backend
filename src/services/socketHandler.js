@@ -7,30 +7,45 @@
  * The key change is moving from a simple `currentVideoId` string to a
  * `currentVideo` object, which looks like: { source: 'youtube', id: '...' }
  * or { source: 'gdrive', id: 'https://...' }.
+ * 
+ * UPDATED: Now also integrates a modular voice chat handler for WebRTC signaling.
  */
 
+// --- NEW --- Import the voice chat handlers
+import { handleVoiceChat, handleVoiceDisconnect } from './voiceHandler.js';
+
 // In-memory store for active room data.
-// UPDATED: The value now contains a 'currentVideo' object instead of a 'videoId' string.
-// Key: roomId, Value: { users: [], videoState: {}, currentVideo: { source, id } }
+// UPDATED: The user object now includes a 'voiceState'.
+// Key: roomId, Value: { users: [ { ..., voiceState: { isJoined, isMuted } } ], ... }
 const rooms = {};
 
 export const handleSocketConnections = (io) => {
     io.on('connection', (socket) => {
         console.log(`User connected: ${socket.id}`);
 
+        // --- NEW --- Plug in the voice chat event handlers for this socket
+        handleVoiceChat(io, socket, rooms);
+
         // --- Room Management ---
         socket.on('join-room', ({ roomId, user }) => {
             if (!roomId) return;
 
             socket.join(roomId);
-            const userWithSocketId = { ...user, id: socket.id, roomId };
+            
+            // UPDATED: Add initial voiceState to the user object
+            const userWithSocketId = { 
+                ...user, 
+                id: socket.id, 
+                roomId,
+                // Users are not in voice chat by default
+                voiceState: { isJoined: false, isMuted: false }
+            };
 
             if (!rooms[roomId]) {
                 // This is the first user, they set the initial state
                 rooms[roomId] = {
                     users: [],
                     videoState: { isPlaying: false, time: 0, speed: 1 },
-                    // UPDATED: Changed from currentVideoId to a more flexible object.
                     currentVideo: null,
                 };
             }
@@ -41,13 +56,16 @@ export const handleSocketConnections = (io) => {
             );
             if (existingUserIndex === -1) {
                 rooms[roomId].users.push(userWithSocketId);
+            } else {
+                // If user exists (e.g., on reconnect), update their data
+                rooms[roomId].users[existingUserIndex] = userWithSocketId;
             }
 
             // Send current room state to the newly joined user
+            // The room state now implicitly contains the voice state of all users.
             socket.emit('room-state', {
                 users: rooms[roomId].users,
                 videoState: rooms[roomId].videoState,
-                // UPDATED: Send the entire 'currentVideo' object.
                 currentVideo: rooms[roomId].currentVideo,
             });
 
@@ -58,46 +76,33 @@ export const handleSocketConnections = (io) => {
         });
 
         // --- Video Synchronization ---
-        // NO CHANGES NEEDED HERE: This event correctly syncs player state regardless of the video source.
         socket.on('player-state-change', ({ roomId, state }) => {
             if (rooms[roomId]) {
                 rooms[roomId].videoState = state;
-                // Broadcast the new state to everyone else
                 socket.to(roomId).emit('player-state-update', state);
             }
         });
 
-        // UPDATED: This event now accepts a 'video' object instead of a 'videoId' string.
-        socket.on('change-video', ({ roomId, video }) => { // `video` is now an object like { source, id }
+        socket.on('change-video', ({ roomId, video }) => {
             if (rooms[roomId]) {
-                // Store the entire video object
                 rooms[roomId].currentVideo = video;
-                
-                // Reset state for new video
                 rooms[roomId].videoState = { isPlaying: true, time: 0, speed: 1 };
-
-                // Inform all clients in the room about the new video object
                 io.to(roomId).emit('video-changed', video);
             }
         });
 
         // --- Chat & Reactions ---
-        // NO CHANGES NEEDED HERE.
         socket.on('send-message', ({ roomId, message }) => {
-            // Broadcast the message to all clients in the room
             io.to(roomId).emit('new-message', message);
         });
 
         socket.on('send-reaction', ({ roomId, reaction }) => {
-            // Broadcast the reaction to all clients in the room
             io.to(roomId).emit('new-reaction', { ...reaction, id: socket.id });
         });
 
         // --- Disconnect Handling ---
-        // NO CHANGES NEEDED HERE.
         socket.on('disconnect', () => {
             console.log(`User disconnected: ${socket.id}`);
-            // Find which room the user was in and remove them
             for (const roomId in rooms) {
                 const room = rooms[roomId];
                 const userIndex = room.users.findIndex(user => user.id === socket.id);
@@ -107,7 +112,11 @@ export const handleSocketConnections = (io) => {
                     io.to(roomId).emit('user-left', departingUser.id);
                     console.log(`User ${departingUser.name} left room ${roomId}`);
 
-                    // If the room is now empty, clean it up from memory
+                    // --- NEW --- Call the voice disconnect handler for cleanup
+                    if (departingUser.voiceState?.isJoined) {
+                        handleVoiceDisconnect(io, roomId, departingUser.id);
+                    }
+
                     if (room.users.length === 0) {
                         delete rooms[roomId];
                         console.log(`Room ${roomId} is now empty and has been closed.`);
